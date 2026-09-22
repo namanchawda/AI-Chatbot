@@ -108,7 +108,7 @@ Embeddings & reranking — run locally via sentence-transformers, no external AP
 
 No authentication — one shared knowledge base; anyone with access sees everything.
 Single-turn chat — history is saved but not fed back into the LLM (by design, for now).
-File support — PDF, HTML, TXT (+ MD, RTF via API). Soft 5MB warning in the UI, no hard cap.
+File support — PDF, HTML, TXT (+ MD, RTF via API). Hard 50MB limit enforced by Streamlit (`maxUploadSize` in `.streamlit/config.toml`).
 Single Postgres instance — no sharding or high-concurrency pooling.
 Local embeddings/reranking — CPU-bound unless a GPU torch build is installed; first run downloads model weights.
 No rate limiting — the API has no abuse protection or quotas.

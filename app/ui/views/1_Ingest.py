@@ -293,12 +293,12 @@ with st.sidebar:
     st.header("Upload a document")
     uploaded_file = st.file_uploader(
         "PDF, HTML, or text file",
-        type=["pdf", "html", "htm", "txt"],
+        type=["pdf", "html", "txt"],
         accept_multiple_files=False,
         disabled=ingestion_in_progress,
     )
 
-    if not ingestion_in_progress and uploaded_file is not None and uploaded_file.size > 5 * 1024 * 1024:
+    if not ingestion_in_progress and uploaded_file is not None and uploaded_file.size > 20 * 1024 * 1024:
         st.warning("Large files may take several minutes to process on this hosted environment.")
 
     chunking_strategy = st.selectbox(
