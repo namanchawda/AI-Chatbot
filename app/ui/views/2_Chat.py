@@ -53,13 +53,19 @@ st.header("\U0001f4ac Chat")
 doc_names = sorted({d["source_file"] for d in documents})
 st.caption(f"Chatting across: {', '.join(doc_names)}")
 
-# --- Sidebar: session management ---
+# --- Sidebar: session management + retrieval options ---
 with st.sidebar:
     if st.button("New chat", use_container_width=True):
         chat_session = store.create_session()
         st.session_state["active_session_id"] = str(chat_session.id)
         st.session_state["chat_history"] = []
         st.rerun()
+
+    use_reranking = st.toggle(
+        "Use reranking",
+        value=True,
+        help="Improves answer relevance by re-scoring retrieved passages, at the cost of a few extra seconds per response.",
+    )
 
     sessions = store.list_sessions()
     for sess in sessions:
@@ -119,7 +125,7 @@ if prompt := st.chat_input("Ask a question about your documents..."):
                     query=prompt,
                     top_k=5,
                     source_file=None,
-                    use_reranking=True,
+                    use_reranking=use_reranking,
                     chat_history=None,
                 )
                 answer_text = result["answer"]
