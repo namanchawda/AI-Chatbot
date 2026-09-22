@@ -83,85 +83,33 @@ On first UI load, paste your Postgres connection string and Groq API key, click 
 Exact pins are in `requirements.txt`.
 
 ## Architecture
+![RAG pipeline overview](./docs/rag-pipeline-overview.png)
 
-### (a) Ingestion
+Ingestion — Uploaded files go to a temp directory (never persisted to disk) → text extracted (PyMuPDF for PDF, BeautifulSoup for HTML) → chunked using one of four strategies (fixed, sentence_aware, paragraph_based, recursive) → embedded locally (sentence-transformers) → stored in Postgres via pgvector. The temp file is deleted immediately after, success or failure. UI uploads run in a background process with live progress; the API endpoint ingests synchronously.
 
-```
-upload → temp file (OS temp dir) → text extraction → chunking → embedding → Postgres
-                                                                              ↓
-                                              temp file deleted (success or failure)
-```
+Retrieval — Every query searches all ingested documents via hybrid search: vector similarity and PostgreSQL full-text search run in parallel and merge via Reciprocal Rank Fusion. An optional cross-encoder reranking step (bge-reranker-base) can refine the top results further.
 
-1. The file is written to a fresh `tempfile.mkdtemp()` directory (never persisted into the repo or a long-lived data dir).
-2. Text is extracted by type: PDF via PyMuPDF, HTML via BeautifulSoup (scripts/styles/iXBRL tags stripped, encoding fallback chain), plain text with encoding fallback.
-3. Text is split with one of four strategies (selected per upload):
-   - **`fixed`** — token windows, 512 tokens / 50-token overlap
-   - **`sentence_aware`** — groups whole sentences up to a token budget; never splits mid-sentence
-   - **`paragraph_based`** — splits on paragraph breaks, falls back to sentence-aware for oversized paragraphs
-   - **`recursive`** — paragraph → sentence → fixed, in priority order
-4. Chunks are embedded in batches with the local sentence-transformers model.
-5. Rows are inserted into `document_chunks` (text, metadata, embedding, generated `tsvector`).
-6. The temp file and its temp directory are removed in a `finally` block — in the UI path this runs in the background worker process; in the API path it runs at the end of the request.
+Generation — Retrieved chunks are passed to Groq with instructions to answer only from that context, or say so if the answer isn't present. Low temperature keeps answers grounded.
 
-UI uploads are processed by a **daemon background process** with status persisted to `.ingestion_status.json` (the page polls it every 2s). The API `POST /api/ingest` endpoint runs ingestion synchronously in the request.
+Note: Chat history is currently not sent to the LLM — each message is answered independently. Conversation history is still saved and browsable (see below); the plumbing to re-enable it exists but is switched off for now.
 
-### (b) Retrieval
-
-Hybrid search across **all ingested documents by default** (no per-document filter unless one is passed explicitly on the API):
-
-1. **Vector search** — embed the query, cosine distance against stored pgvector embeddings.
-2. **Keyword search** — PostgreSQL full-text (`plainto_tsquery` / `ts_rank` over the generated `tsvector`).
-3. The two ranked lists are merged with **Reciprocal Rank Fusion** (RRF, `k = 60`), running both retrievers concurrently.
-4. **Optional reranking** — a `BAAI/bge-reranker-base` cross-encoder re-scores the fused candidates and narrows to `top_k`. Toggleable per request (`use_reranking`); the Chat UI always enables it.
-
-### (c) Generation
-
-Retrieved chunks are formatted into a grounded prompt (each chunk labeled with source file + chunk id for the model's reference only) and sent to Groq with instructions to answer **only** from that context and to refuse with a fixed phrase when the answer is absent. Low temperature (`0.2`) and a capped completion length keep answers close to the context.
-
-**Important current behavior:** chat history is **not** sent to the LLM. Every request calls the pipeline with `chat_history=None`, so each message is answered as single-turn Q&A. Prior turns are still written to the database for display (see below) — the plumbing to feed them back exists but is intentionally disabled at all call sites.
-
-### (d) Chat sessions
-
-Two tables, created automatically:
-
-- **`chat_sessions`** — id, optional title (auto-set from the first question, truncated to 80 chars), created/updated timestamps.
-- **`chat_messages`** — id, session FK (cascade delete), role (`user` / `assistant`), content, optional `sources` JSONB snapshot (the chunks cited for that assistant turn), timestamp.
-
-Sessions are listed in the sidebar, messages are reloaded into the UI when switched, and history survives restarts — but as noted, it is **saved and browsable, not fed back into the prompt**.
-
-### Flow (end to end)
-
-```
-                 ┌────────────── Ingestion ──────────────┐
- upload ──► temp file ──► extract ──► chunk ──► embed ──► Postgres
-                 │                                         │ delete temp
-                 └─────────────────────────────────────────┘
-
-                 ┌────────────── Query / Chat ───────────┐
- question ──► hybrid search (vector ⊕ keyword, RRF) ──► optional rerank
-        ──► build prompt (context + question, no history) ──► Groq ──► answer
-        ──► persist user + assistant messages to chat_messages
-                 └─────────────────────────────────────────┘
-```
+Chat sessions — Conversations persist in Postgres (chat_sessions, chat_messages), auto-titled from the first question, and survive restarts.
 
 ## AI Usage
 
-Two distinct roles for AI in this project:
+This project was built with AI-assisted development (Codex/OpenCode) for implementation, debugging, and refactoring, guided by manual architecture decisions and verification throughout.
 
-1. **AI used to build this project** — developed with AI-assisted tooling (Codex / OpenCode) for implementation, debugging, and refactoring, guided by the project author's architecture decisions, requirements, and manual verification (running the stack, inspecting retrieved chunks, timing extraction, etc.). AI wrote and iterated on code; humans specified behavior and validated results.
-2. **AI used inside the running app** — at runtime, user questions are answered by a Groq-hosted LLM (`GROQ_MODEL`, e.g. `openai/gpt-oss-120b`) conditioned on retrieved document context. Embeddings and reranking run locally via sentence-transformers and do not call an external LLM.
+At runtime, the app itself uses AI for:
 
-## Assumptions
+Answer generation — a Groq-hosted LLM answers questions from retrieved context.
+Embeddings & reranking — run locally via sentence-transformers, no external API calls.
 
-Practical constraints to know before using or deploying this:
+## Assumptions & Limitations
 
-- **No authentication or per-user isolation.** All uploaded documents land in one shared knowledge base; any client that can reach the API/UI sees and queries everything.
-- **Chat history is disabled for the LLM.** Each message is answered independently (single-turn per message). History is persisted and shown in the UI but not included in the prompt — by design in the current code, not a bug.
-- **Supported file types.** UI uploader: PDF, HTML, HTM, TXT. API `POST /api/ingest` additionally accepts `.md` and `.rtf`. The UI shows a warning for files over **5 MB** (soft warning only — there is no hard server-side size cap beyond available memory/disk).
-- **Single Postgres/Neon instance.** No multi-region, sharding, or connection-pool tuning for high concurrency; one engine per process with `pool_pre_ping`.
-- **Reranking is optional but on by default** (API default `use_reranking=true`; Chat UI always on). The cross-encoder is loaded once at import and adds per-query latency proportional to candidate count.
-- **Embeddings and reranking are local and CPU-bound** unless a GPU-capable torch build is installed. First model load downloads weights from Hugging Face; large ingests can take minutes on CPU (progress is shown).
-- **No rate limiting, quota, or abuse protection** on the API. Generation cost/latency is whatever Groq + retrieval incur per request.
-- **API ingestion is synchronous** — `POST /api/ingest` blocks until the file is fully ingested. Long documents will hold the HTTP connection open. (The Streamlit path uses a background worker instead.)
-- **Background ingestion status is file-based** (`.ingestion_status.json`, stale after 30 minutes). It assumes a single worker at a time; concurrent ingests from multiple clients are not coordinated.
-- **Connection secrets for the UI are cached on disk** in `.streamlit_connection.json` (repo root, gitignored). Treat any shared deployment accordingly.
+No authentication — one shared knowledge base; anyone with access sees everything.
+Single-turn chat — history is saved but not fed back into the LLM (by design, for now).
+File support — PDF, HTML, TXT (+ MD, RTF via API). Soft 5MB warning in the UI, no hard cap.
+Single Postgres instance — no sharding or high-concurrency pooling.
+Local embeddings/reranking — CPU-bound unless a GPU torch build is installed; first run downloads model weights.
+No rate limiting — the API has no abuse protection or quotas.
+Synchronous API ingestion — POST /api/ingest blocks until done; the UI uses a background worker instead.
