@@ -87,7 +87,7 @@ Exact pins are in `requirements.txt`.
 
 Ingestion — Uploaded files go to a temp directory (never persisted to disk) → text extracted (PyMuPDF for PDF, BeautifulSoup for HTML) → chunked using one of four strategies (fixed, sentence_aware, paragraph_based, recursive) → embedded locally (sentence-transformers) → stored in Postgres via pgvector. The temp file is deleted immediately after, success or failure. UI uploads run in a background process with live progress; the API endpoint ingests synchronously.
 
-Retrieval — Every query searches all ingested documents via hybrid search: vector similarity and PostgreSQL full-text search run in parallel and merge via Reciprocal Rank Fusion. An optional cross-encoder reranking step (bge-reranker-base) can refine the top results further.
+Retrieval — Every query searches all ingested documents via hybrid search: vector similarity and PostgreSQL full-text search run in parallel and merge via Reciprocal Rank Fusion. An optional cross-encoder reranking step (bge-reranker-base) re-scores the fused candidates for better relevance, at the cost of a few extra seconds per response. It's toggleable directly from the Chat page sidebar, letting you trade off speed vs. answer quality per conversation.
 
 Generation — Retrieved chunks are passed to Groq with instructions to answer only from that context, or say so if the answer isn't present. Low temperature keeps answers grounded.
 
@@ -111,5 +111,6 @@ Single-turn chat — history is saved but not fed back into the LLM (by design, 
 File support — PDF, HTML, TXT (+ MD, RTF via API). Hard 50MB limit enforced by Streamlit (`maxUploadSize` in `.streamlit/config.toml`).
 Single Postgres instance — no sharding or high-concurrency pooling.
 Local embeddings/reranking — CPU-bound unless a GPU torch build is installed; first run downloads model weights.
+Reranking is optional and user-controlled — on by default for higher-quality retrieval; can be toggled per-session from the Chat sidebar.
 No rate limiting — the API has no abuse protection or quotas.
 Synchronous API ingestion — POST /api/ingest blocks until done; the UI uses a background worker instead.
