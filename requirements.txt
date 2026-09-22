@@ -1,0 +1,16 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.20
+sqlalchemy==2.0.35
+psycopg[binary]>=3.2.2
+pgvector==0.2.5
+sentence-transformers==3.2.1
+transformers==4.45.2
+torch>=2.6.0
+python-dotenv==1.0.1
+tiktoken==0.8.0
+PyMuPDF
+beautifulsoup4==4.12.3
+groq==0.13.0
+streamlit==1.39.0

@@ -1,0 +1,8 @@
+.env
+.streamlit_connection.json
+.ingestion_status.json
+venv/
+__pycache__/
+*.pyc
+*.log
+run_log.txt
