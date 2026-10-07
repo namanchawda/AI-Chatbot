@@ -18,12 +18,21 @@ def prepare_answer(
     chunking_strategy: str | None = None,
     use_reranking: bool = True,
     chat_history: list[dict] | None = None,
+    *,
+    user_id: str,
 ) -> dict:
     """Retrieve and prepare grounded context before either buffered or streamed generation.
 
-    When source_file is None (the default), retrieval searches across ALL ingested
-    documents. Pass a specific filename or list of filenames to scope the search.
+    When source_file is None (the default), retrieval searches across ALL of the
+    given account's ingested documents. Pass a specific filename or list of
+    filenames to scope the search. user_id is REQUIRED (keyword-only): it scopes
+    retrieval to one account's chunks at the SQL level, a missing argument raises
+    TypeError, and None/"" raises ValueError — there is no "search every account"
+    fallback.
     """
+    if not user_id:
+        raise ValueError("user_id is required: retrieval must be scoped to a single account.")
+
     store._ensure_initialized()
 
     if top_k is None:
@@ -36,6 +45,7 @@ def prepare_answer(
         top_k=20,
         source_file=source_file,
         chunking_strategy=chunking_strategy,
+        user_id=user_id,
     )
     if use_reranking:
         retrieved = rerank(query=query, candidates=wide_candidates, top_k=top_k)
@@ -60,8 +70,13 @@ def answer_question_stream(
     chunking_strategy: str | None = None,
     use_reranking: bool = True,
     chat_history: list[dict] | None = None,
+    *,
+    user_id: str,
 ):
-    """Yield the generated answer after retrieval and reranking complete."""
+    """Yield the generated answer after retrieval and reranking complete.
+
+    user_id is REQUIRED — see prepare_answer().
+    """
     prepared = prepare_answer(
         query=query,
         top_k=top_k,
@@ -69,6 +84,7 @@ def answer_question_stream(
         chunking_strategy=chunking_strategy,
         use_reranking=use_reranking,
         chat_history=chat_history,
+        user_id=user_id,
     )
     yield from generate_answer_stream(prepared["prompt"])
 
@@ -85,11 +101,15 @@ def answer_question(
     chunking_strategy: str | None = None,
     use_reranking: bool = True,
     chat_history: list[dict] | None = None,
+    *,
+    user_id: str,
 ) -> dict:
     """Run retrieval on the query, build a grounded prompt, and generate an answer.
 
-    When source_file is None (the default), retrieval searches across ALL ingested
-    documents. Pass a specific filename or list of filenames to scope the search.
+    When source_file is None (the default), retrieval searches across ALL of the
+    given account's ingested documents. Pass a specific filename or list of
+    filenames to scope the search. user_id is REQUIRED (keyword-only) — see
+    prepare_answer(); there is no unscoped "search every account" mode.
     """
     prepared = prepare_answer(
         query=query,
@@ -98,6 +118,7 @@ def answer_question(
         chunking_strategy=chunking_strategy,
         use_reranking=use_reranking,
         chat_history=chat_history,
+        user_id=user_id,
     )
     retrieved = prepared["retrieved"]
     answer = generate_answer(prepared["prompt"])
@@ -122,6 +143,15 @@ def answer_question(
 
 
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "Usage: python -m app.generation.rag_pipeline <user_id>\n"
+            "user_id is required — retrieval is always scoped to one account."
+        )
+    owner_id = sys.argv[1]
+
     questions = [
         "What are Apple's main risk factors?",
         "What is JPMorgan's approach to interest rate risk?",
@@ -130,7 +160,7 @@ if __name__ == "__main__":
 
     for question in questions:
         try:
-            result = answer_question(question, top_k=3)
+            result = answer_question(question, top_k=3, user_id=owner_id)
             print(f"\nQuery: {question}")
             print(f"Answer: {result['answer']}")
             print(f"Sources: {result['sources']}")

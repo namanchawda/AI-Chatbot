@@ -6,22 +6,19 @@ import streamlit as st
 
 from app.generation.rag_pipeline import answer_question
 from app.ingestion import store
-from app.ingestion.job_status import mark_stale_if_needed
 from app.ui._shared import (
     get_available_documents,
     is_ingestion_in_progress,
 )
-
-DocumentChunk = store.DocumentChunk
 
 
 # ---------------------------------------------------------------------------
 # Gate: no documents ingested yet
 # ---------------------------------------------------------------------------
 
-ingestion_status = mark_stale_if_needed()
-documents = get_available_documents()
-ingestion_running = is_ingestion_in_progress()
+user_id = st.session_state["user_id"]
+documents = get_available_documents(user_id)
+ingestion_running = is_ingestion_in_progress(user_id)
 
 if not documents and not ingestion_running:
     st.header("\U0001f4ac Chat")
@@ -56,7 +53,7 @@ st.caption(f"Chatting across: {', '.join(doc_names)}")
 # --- Sidebar: session management + retrieval options ---
 with st.sidebar:
     if st.button("New chat", use_container_width=True):
-        chat_session = store.create_session()
+        chat_session = store.create_session(user_id=user_id)
         st.session_state["active_session_id"] = str(chat_session.id)
         st.session_state["chat_history"] = []
         st.rerun()
@@ -67,7 +64,8 @@ with st.sidebar:
         help="Improves answer relevance by re-scoring retrieved passages, at the cost of a few extra seconds per response.",
     )
 
-    sessions = store.list_sessions()
+    # Scoped to this account in SQL — no other user's sessions are listed.
+    sessions = store.list_sessions(user_id=user_id)
     for sess in sessions:
         session_id = sess["id"]
         title = sess.get("title") or "Untitled chat"
@@ -77,7 +75,7 @@ with st.sidebar:
         with col_label:
             if st.button(label, key=f"sess_{session_id}", use_container_width=True):
                 st.session_state["active_session_id"] = session_id
-                messages = store.get_messages(session_id)
+                messages = store.get_messages(session_id, user_id=user_id)
                 st.session_state["chat_history"] = [
                     {"role": msg["role"], "content": msg["content"], "sources": msg.get("sources")}
                     for msg in messages
@@ -85,7 +83,7 @@ with st.sidebar:
                 st.rerun()
         with col_del:
             if st.button("x", key=f"del_{session_id}"):
-                store.delete_session(session_id)
+                store.delete_session(session_id, user_id=user_id)
                 if st.session_state.get("active_session_id") == session_id:
                     st.session_state["active_session_id"] = None
                     st.session_state["chat_history"] = []
@@ -120,13 +118,15 @@ if prompt := st.chat_input("Ask a question about your documents..."):
         with st.spinner("Retrieving and generating..."):
             try:
                 # Conversation history stays in the DB/UI only; it is
-                # intentionally not sent to the LLM for now.
+                # intentionally not sent to the LLM for now. Retrieval is
+                # scoped to this account's chunks at the SQL level.
                 result = answer_question(
                     query=prompt,
                     top_k=5,
                     source_file=None,
                     use_reranking=use_reranking,
                     chat_history=None,
+                    user_id=user_id,
                 )
                 answer_text = result["answer"]
                 sources = result["sources"]
@@ -147,16 +147,29 @@ if prompt := st.chat_input("Ask a question about your documents..."):
     ]
 
     if session_id is None:
-        chat_session = store.create_session()
+        chat_session = store.create_session(user_id=user_id)
         session_id = str(chat_session.id)
         st.session_state["active_session_id"] = session_id
 
-    store.add_message(session_id, "user", prompt)
-    store.add_message(session_id, "assistant", answer_text, sources=sources_for_storage)
+    try:
+        store.add_message(session_id, "user", prompt, user_id=user_id)
+        store.add_message(
+            session_id, "assistant", answer_text, sources=sources_for_storage, user_id=user_id
+        )
+    except ValueError:
+        # Saved session was deleted or belongs to another account — start a
+        # fresh one instead of dropping the exchange.
+        chat_session = store.create_session(user_id=user_id)
+        session_id = str(chat_session.id)
+        st.session_state["active_session_id"] = session_id
+        store.add_message(session_id, "user", prompt, user_id=user_id)
+        store.add_message(
+            session_id, "assistant", answer_text, sources=sources_for_storage, user_id=user_id
+        )
 
     # First exchange only: use the opening question as the session title.
     if len(st.session_state["chat_history"]) == 1:
-        store.update_session_title(session_id, prompt[:80])
+        store.update_session_title(session_id, prompt[:80], user_id=user_id)
 
     st.session_state["chat_history"].append({
         "role": "assistant",

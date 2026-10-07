@@ -22,6 +22,8 @@ def search(
     top_k: int | None = None,
     source_file: str | list[str] | None = None,
     chunking_strategy: str | None = None,
+    *,
+    user_id: str,
 ) -> list[dict]:
     """Return the closest matching chunk records for a query string.
 
@@ -29,7 +31,13 @@ def search(
     embeddings using cosine distance. Results are ordered from closest to farthest.
 
     source_file can be a single filename, a list of filenames, or None (search all).
+    user_id is REQUIRED (keyword-only): retrieval is always scoped to exactly one
+    account, so a caller that omits it raises TypeError and one that passes
+    None/"" raises ValueError — there is no "search everyone" fallback.
     """
+    if not user_id:
+        raise ValueError("user_id is required: vector search must be scoped to a single account.")
+
     if top_k is None:
         top_k = settings.QUERY_TOP_K
 
@@ -37,6 +45,9 @@ def search(
 
     # cosine_distance returns 0.0 for identical vectors and 2.0 for opposite
     # ones; ascending order puts the closest matches first.
+    # The owning account is always part of the WHERE clause — retrieval is
+    # never unscoped — and filename (== or IN) and/or chunking strategy may
+    # narrow it further (None means "all of this account's files").
     stmt = (
         select(
             DocumentChunk.chunk_text.label("chunk_text"),
@@ -45,12 +56,11 @@ def search(
             (DocumentChunk.embedding.cosine_distance(query_embedding)).label("distance"),
         )
         .where(DocumentChunk.embedding.isnot(None))
+        .where(DocumentChunk.user_id == user_id)
         .order_by(DocumentChunk.embedding.cosine_distance(query_embedding).asc())
         .limit(top_k)
     )
 
-    # Optional SQL filters: single filename (==), list of filenames (IN),
-    # and/or a specific chunking strategy — None means "search all".
     if source_file is not None:
         if isinstance(source_file, list):
             stmt = stmt.where(DocumentChunk.source_file.in_(source_file))
@@ -74,13 +84,22 @@ def search(
 
 
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "Usage: python -m app.retrieval.vector_search <user_id>\n"
+            "user_id is required — retrieval is always scoped to one account."
+        )
+    owner_id = sys.argv[1]
+
     queries = [
         "What are Apple's main risk factors?",
         "What is JPMorgan's approach to interest rate risk?",
     ]
 
     for question in queries:
-        matches = search(question, top_k=3)
+        matches = search(question, top_k=3, user_id=owner_id)
         print(f"\nQuery: {question}")
         if not matches:
             print("No matching chunks found.")

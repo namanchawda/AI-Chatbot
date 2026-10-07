@@ -1,8 +1,8 @@
 """Standalone multiprocessing target for durable document ingestion.
 
-Runs in a child process with no Streamlit import: rebuilds the DB engine
-from the URL passed by the parent, reports progress via the status file,
-and always cleans up the temp upload in its finally block.
+Runs in a child process with no Streamlit import: rebuilds the DB engine from
+settings, reports progress via the status file, and always cleans up the temp
+upload in its finally block.
 """
 
 from __future__ import annotations
@@ -66,13 +66,14 @@ def run_ingestion_job(
     filepath: str,
     filename: str,
     chunking_strategy: str,
-    database_url: str,
+    user_id: str,
 ) -> None:
     """Run ingestion in a child process without importing the Streamlit app."""
     print(f"[ingestion-worker] Process started (pid={os.getpid()})", flush=True)
     try:
-        # Child process starts with no engine — rebuild it from the URL the parent passed.
-        store.init_engine(database_url)
+        # Child process starts with no engine — build it from settings (.env /
+        # st.secrets). There is no runtime connection override anymore.
+        store.init_engine()
         # Record the child pid in the status file for diagnostics.
         write_status(process_pid=os.getpid())
 
@@ -94,6 +95,7 @@ def run_ingestion_job(
             filepath,
             chunking_strategy=chunking_strategy,
             progress_callback=update_progress,
+            user_id=user_id,
         )
         write_status(
             in_progress=False,

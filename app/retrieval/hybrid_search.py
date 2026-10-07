@@ -60,6 +60,8 @@ def hybrid_search(
     source_file: str | list[str] | None = None,
     chunking_strategy: str | None = None,
     wide_candidate_k: int = 10,
+    *,
+    user_id: str,
 ) -> list[dict]:
     """Combine dense vector retrieval and keyword retrieval using RRF.
 
@@ -67,7 +69,14 @@ def hybrid_search(
     then their ranks are merged to produce the final top_k list.
 
     source_file can be a single filename, a list of filenames, or None (search all).
+    user_id is REQUIRED (keyword-only) and is pushed down into BOTH retrievers,
+    so neither one can surface another account's chunks: a caller that omits it
+    raises TypeError and one that passes None/"" raises ValueError — there is no
+    "search everyone" fallback.
     """
+    if not user_id:
+        raise ValueError("user_id is required: hybrid search must be scoped to a single account.")
+
     if top_k is None:
         top_k = 5
     if wide_candidate_k <= 0:
@@ -81,6 +90,7 @@ def hybrid_search(
             top_k=wide_candidate_k,
             source_file=source_file,
             chunking_strategy=chunking_strategy,
+            user_id=user_id,
         )
         keyword_future = executor.submit(
             keyword_search,
@@ -88,6 +98,7 @@ def hybrid_search(
             top_k=wide_candidate_k,
             source_file=source_file,
             chunking_strategy=chunking_strategy,
+            user_id=user_id,
         )
         vector_candidates = vector_future.result()
         keyword_candidates = keyword_future.result()
@@ -112,8 +123,16 @@ def hybrid_search(
 
 
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "Usage: python -m app.retrieval.hybrid_search <user_id>\n"
+            "user_id is required — retrieval is always scoped to one account."
+        )
+
     query = "What are Apple's main risk factors?"
-    results = hybrid_search(query, top_k=5)
+    results = hybrid_search(query, top_k=5, user_id=sys.argv[1])
     print(f"Query: {query}\n")
     for idx, row in enumerate(results, start=1):
         print(f"{idx}. {row['source_file']} | chunk_id={row['chunk_id']} | rrf={row['rrf_score']:.6f}")

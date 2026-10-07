@@ -14,3 +14,4 @@ PyMuPDF
 beautifulsoup4==4.12.3
 groq==0.13.0
 streamlit==1.39.0
+bcrypt==4.2.1

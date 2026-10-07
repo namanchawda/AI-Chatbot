@@ -10,17 +10,14 @@ from pathlib import Path
 import streamlit as st
 
 from app.config import settings
-from app.ingestion import store
 from app.ingestion.background_worker import cleanup_temp_upload, run_ingestion_job
 from app.ingestion.job_status import mark_stale_if_needed, write_status
 from app.ui._shared import (
     CHUNKING_STRATEGY_LABELS,
-    clear_connection_details,
     format_strategy_label,
     get_available_documents,
+    get_chunk_counts,
 )
-
-DocumentChunk = store.DocumentChunk
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +29,7 @@ def launch_ingestion_worker(
     filepath: str,
     filename: str,
     chunking_strategy: str,
-    database_url: str,
+    user_id: str,
 ) -> str | None:
     """Launch a standalone daemon process after the uploaded file is on disk.
 
@@ -43,7 +40,7 @@ def launch_ingestion_worker(
         # terminated if Streamlit exits mid-ingestion.
         worker = multiprocessing.Process(
             target=run_ingestion_job,
-            args=(filepath, filename, chunking_strategy, database_url),
+            args=(filepath, filename, chunking_strategy, user_id),
             daemon=True,
             name="ingestion-worker",
         )
@@ -53,7 +50,7 @@ def launch_ingestion_worker(
     except Exception as exc:
         error_msg = f"Failed to start ingestion process: {exc}"
         print(f"[ingestion-worker] {error_msg}", flush=True)
-        write_status(in_progress=False, stage="failed", error=error_msg)
+        write_status(in_progress=False, stage="failed", user_id=user_id, error=error_msg)
         return error_msg
 
 
@@ -178,8 +175,15 @@ def render_ingestion_stage_ui(status: dict) -> None:
         st.caption(f"{stage_label}... Please wait.")
 
 
-def render_ingestion_monitor() -> None:
-    """Poll durable worker status so progress survives Streamlit reruns and refreshes."""
+def render_ingestion_monitor(user_id: str) -> None:
+    """Poll durable worker status so progress survives Streamlit reruns and refreshes.
+
+    Only jobs started by `user_id` are rendered — another account's upload must
+    never show up (filename, progress, or failure) on this page.
+    """
+
+    def belongs_to_this_user(status: dict) -> bool:
+        return status.get("user_id") == user_id
 
     # Each fragment re-runs on its own 2-second timer without a full page
     # rerun, so the pipeline view stays live while the worker writes the
@@ -189,6 +193,8 @@ def render_ingestion_monitor() -> None:
     def poll_main_status() -> None:
         # Refresh the in-progress pipeline view (or surface a failure) each tick.
         status = mark_stale_if_needed()
+        if not belongs_to_this_user(status):
+            return
         if status.get("in_progress"):
             render_ingestion_stage_ui(status)
         elif status.get("stage") == "failed":
@@ -199,6 +205,8 @@ def render_ingestion_monitor() -> None:
         # On the first tick after completion, stash a one-shot success banner
         # in session_state and rerun so the main page body can display it.
         status = mark_stale_if_needed()
+        if not belongs_to_this_user(status):
+            return
         if status.get("stage") == "complete" and not st.session_state.get("ingestion_success_pending"):
             st.session_state["ingestion_success_pending"] = {
                 "filename": status.get("filename", "document"),
@@ -207,36 +215,19 @@ def render_ingestion_monitor() -> None:
             st.rerun()
 
     status = mark_stale_if_needed()
-    if status.get("in_progress"):
+    if status.get("in_progress") and belongs_to_this_user(status):
         poll_main_status()
         poll_completion()
 
 
-def render_documents_table(documents: list[dict]) -> None:
-    """Display ingested documents as a clean table."""
+def render_documents_table(documents: list[dict], user_id: str) -> None:
+    """Display the current account's ingested documents as a clean table."""
     if not documents:
         st.info("No documents ingested yet.")
         return
 
-    if store.SessionLocal is not None:
-        with store.SessionLocal() as session:
-            from sqlalchemy import func
-
-            count_rows = (
-                session.query(
-                    DocumentChunk.source_file,
-                    DocumentChunk.chunking_strategy,
-                    func.count(DocumentChunk.id).label("chunk_count"),
-                )
-                .group_by(DocumentChunk.source_file, DocumentChunk.chunking_strategy)
-                .all()
-            )
-        count_map = {
-            (row.source_file, row.chunking_strategy or "fixed"): row.chunk_count
-            for row in count_rows
-        }
-    else:
-        count_map = {}
+    # Chunk counts are scoped to this account too — never another user's files.
+    count_map = get_chunk_counts(user_id)
 
     rows_data = []
     for doc in documents:
@@ -256,16 +247,25 @@ def render_documents_table(documents: list[dict]) -> None:
 
 st.header("\U0001f4e5 Ingest Documents")
 
+# Every query on this page is scoped to the signed-in account.
+user_id = st.session_state["user_id"]
+
 # Always register polling fragments so they detect both progress and failure.
-render_ingestion_monitor()
+render_ingestion_monitor(user_id)
 
 ingestion_status = mark_stale_if_needed()
-ingestion_in_progress = bool(ingestion_status.get("in_progress"))
+# Only this account's job is surfaced (progress, failure, success banner).
+job_is_mine = ingestion_status.get("user_id") == user_id
+ingestion_in_progress = bool(ingestion_status.get("in_progress")) and job_is_mine
 ingestion_failed = (
     not ingestion_in_progress
     and ingestion_status.get("stage") == "failed"
     and ingestion_status.get("error")
+    and job_is_mine
 )
+# The status file is a single global slot, so only one ingestion runs at a
+# time — other accounts are told a job is running without seeing whose file.
+job_running_globally = bool(ingestion_status.get("in_progress"))
 
 success_pending = st.session_state.pop("ingestion_success_pending", None)
 if success_pending:
@@ -285,20 +285,17 @@ if ingestion_failed:
 
 # --- Sidebar (ingestion controls) ---
 with st.sidebar:
-    if st.button("Disconnect", disabled=ingestion_in_progress):
-        st.session_state["db_connected"] = False
-        clear_connection_details()
-        st.rerun()
-
     st.header("Upload a document")
+    if job_running_globally and not ingestion_in_progress:
+        st.info("An ingestion is already running — one at a time, please.")
     uploaded_file = st.file_uploader(
         "PDF, HTML, or text file",
         type=["pdf", "html", "txt"],
         accept_multiple_files=False,
-        disabled=ingestion_in_progress,
+        disabled=job_running_globally,
     )
 
-    if not ingestion_in_progress and uploaded_file is not None and uploaded_file.size > 20 * 1024 * 1024:
+    if not job_running_globally and uploaded_file is not None and uploaded_file.size > 20 * 1024 * 1024:
         st.warning("Large files may take several minutes to process on this hosted environment.")
 
     chunking_strategy = st.selectbox(
@@ -306,10 +303,10 @@ with st.sidebar:
         options=list(CHUNKING_STRATEGY_LABELS.keys()),
         format_func=lambda strategy: CHUNKING_STRATEGY_LABELS[strategy],
         index=0,
-        disabled=ingestion_in_progress,
+        disabled=job_running_globally,
     )
 
-    if st.button("Ingest", use_container_width=True, disabled=ingestion_in_progress):
+    if st.button("Ingest", use_container_width=True, disabled=job_running_globally):
         if uploaded_file is None:
             st.warning("Please upload a file before ingesting.")
         elif Path(uploaded_file.name).suffix.lower() not in {".pdf", ".html", ".htm", ".txt"}:
@@ -324,7 +321,8 @@ with st.sidebar:
             try:
                 # Seed the status file before spawning so the monitor has
                 # something to show from the first tick (and staleness timing
-                # starts now).
+                # starts now). user_id tags the job so other accounts never
+                # see this progress or its filename.
                 write_status(
                     in_progress=True,
                     filename=uploaded_file.name,
@@ -332,19 +330,19 @@ with st.sidebar:
                     current=0,
                     total=0,
                     started_at=time.time(),
+                    user_id=user_id,
                     error=None,
                 )
                 destination.write_bytes(uploaded_file.getvalue())
-                database_url = store.engine.url.render_as_string(hide_password=False)
                 ingestion_error = launch_ingestion_worker(
                     str(destination),
                     uploaded_file.name,
                     chunking_strategy,
-                    database_url,
+                    user_id,
                 )
             except Exception as exc:
                 ingestion_error = str(exc)
-                write_status(in_progress=False, stage="failed", error=ingestion_error)
+                write_status(in_progress=False, stage="failed", user_id=user_id, error=ingestion_error)
 
             if ingestion_error is None:
                 st.success(f"Ingestion started for **{uploaded_file.name}**.")
@@ -358,8 +356,8 @@ with st.sidebar:
 
 # --- Main area: ingested documents table ---
 st.subheader("Ingested Documents")
-documents = get_available_documents()
-render_documents_table(documents)
+documents = get_available_documents(user_id)
+render_documents_table(documents, user_id)
 
 if documents:
     st.caption(f"{len(documents)} document/strategy combination(s) in the knowledge base.")

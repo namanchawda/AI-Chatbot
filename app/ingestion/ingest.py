@@ -23,13 +23,15 @@ def ingest_file(
     chunking_strategy: str = "fixed",
     progress_callback: Callable[[str, float], None] | None = None,
     extracted_text: str | None = None,
+    user_id: str | None = None,
 ) -> int:
     """Load a filing, create chunks, embed them, and store the result in Postgres.
 
     Step 1: read the document text from a local file via load_filing().
     Step 2: split the text into token-based chunks with chunk_text().
     Step 3: convert the chunk list into plain text strings and batch-embed them.
-    Step 4: store the chunk metadata and embeddings into the vector table.
+    Step 4: store the chunk metadata and embeddings into the vector table,
+            tagged with the owning account (user_id).
     """
     # Progress percentages are coarse stage markers (load 5% → chunk 20% →
     # embed 20-85% → store 95% → done 100%) mapped by the UI pipeline display.
@@ -80,16 +82,31 @@ def ingest_file(
     # DocumentChunk.source_file shown in the UI and used for retrieval filters.
     source_file = path.name
     report("Storing... (95%)", 0.95)
-    store.store_chunks(source_file, chunks, embeddings, chunking_strategy=chunking_strategy)
+    store.store_chunks(
+        source_file,
+        chunks,
+        embeddings,
+        chunking_strategy=chunking_strategy,
+        user_id=user_id,
+    )
     report("Complete (100%)", 1.0)
     print(f"Stored {len(chunks)} chunks for {source_file} in the vector database.")
     return len(chunks)
 
 
-def file_already_ingested(source_file: str, chunking_strategy: str | None = None) -> bool:
-    """Return True if the given source_file and chunking strategy are already present."""
+def file_already_ingested(
+    source_file: str,
+    chunking_strategy: str | None = None,
+    user_id: str | None = None,
+) -> bool:
+    """Return True if the given source_file and chunking strategy are already present.
+
+    Pass user_id to check only one account's copy (the UI/API ingestion path).
+    """
     with store.SessionLocal() as session:
         query = session.query(DocumentChunk).filter(DocumentChunk.source_file == source_file)
+        if user_id is not None:
+            query = query.filter(DocumentChunk.user_id == user_id)
         if chunking_strategy is not None:
             query = query.filter(DocumentChunk.chunking_strategy == chunking_strategy)
         return query.first() is not None

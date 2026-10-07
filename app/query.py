@@ -19,13 +19,26 @@ def parse_args() -> argparse.Namespace:
         dest="source_file",
         help="Optional source filing filename to filter retrieval, e.g. jpm_10k_2025.html",
     )
+    parser.add_argument(
+        "--user",
+        dest="user_id",
+        required=True,
+        help=(
+            "Account id that owns the documents to search. Required: retrieval "
+            "is always scoped to one account, so there is no unscoped mode."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Run the RAG pipeline on the parsed question and print the answer with sources."""
     args = parse_args()
-    result = answer_question(args.question, source_file=args.source_file)
+    result = answer_question(
+        args.question,
+        source_file=args.source_file,
+        user_id=args.user_id,
+    )
 
     print("\nQuestion:")
     print(args.question)
@@ -40,5 +53,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    store._ensure_initialized()
+    # create_table() is idempotent and applies the user_id migration, so the
+    # CLI works against a database that has never been opened by the app.
+    store.create_table()
     main()

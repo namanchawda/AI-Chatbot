@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from sqlalchemy import func
 
-from app.config import settings
 from app.ingestion import store
 from app.ingestion.job_status import mark_stale_if_needed
 
@@ -15,9 +13,6 @@ DocumentChunk = store.DocumentChunk
 # Constants
 # ---------------------------------------------------------------------------
 
-# Repo-root JSON cache of the active DB/Groq connection (cleared on disconnect).
-CONNECTION_FILE = Path(__file__).resolve().parents[2] / ".streamlit_connection.json"
-AVAILABLE_GROQ_MODELS = ["openai/gpt-oss-120b"]
 CHUNKING_STRATEGY_LABELS = {
     "fixed": "Fixed-size",
     "sentence_aware": "Sentence-aware",
@@ -31,29 +26,17 @@ CHUNKING_STRATEGY_LABELS = {
 # ---------------------------------------------------------------------------
 
 
-def save_connection_details(connection_string: str, groq_api_key: str, groq_model: str) -> None:
-    """Persist the active DB and Groq settings to a local JSON file."""
-    payload = {
-        "connection_string": connection_string,
-        "groq_api_key": groq_api_key,
-        "groq_model": groq_model,
-    }
-    CONNECTION_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def clear_connection_details() -> None:
-    """Remove any persisted DB/Groq connection cache."""
-    if CONNECTION_FILE.exists():
-        CONNECTION_FILE.unlink()
-
-
 def format_strategy_label(strategy: str) -> str:
     """Return a human-friendly label for a chunking strategy key."""
     return CHUNKING_STRATEGY_LABELS.get(strategy, strategy)
 
 
-def get_available_documents() -> list[dict]:
-    """Return distinct (source_file, chunking_strategy) combinations currently ingested in the DB."""
+def get_available_documents(user_id: str) -> list[dict]:
+    """Return the (source_file, chunking_strategy) pairs ingested by one account.
+
+    Scoped by user_id in SQL so a freshly created account always sees an empty
+    knowledge base, regardless of what anyone else has uploaded.
+    """
     if store.SessionLocal is None:
         return []
     with store.SessionLocal() as session:
@@ -62,6 +45,7 @@ def get_available_documents() -> list[dict]:
                 DocumentChunk.source_file,
                 DocumentChunk.chunking_strategy,
             )
+            .filter(DocumentChunk.user_id == user_id)
             .distinct()
             .order_by(DocumentChunk.source_file, DocumentChunk.chunking_strategy)
             .all()
@@ -76,7 +60,35 @@ def get_available_documents() -> list[dict]:
     ]
 
 
-def is_ingestion_in_progress() -> bool:
-    """Return True if a background ingestion job is currently running."""
+def get_chunk_counts(user_id: str) -> dict[tuple[str, str], int]:
+    """Return {(source_file, chunking_strategy): chunk_count} for one account."""
+    if store.SessionLocal is None:
+        return {}
+
+    with store.SessionLocal() as session:
+        rows = (
+            session.query(
+                DocumentChunk.source_file,
+                DocumentChunk.chunking_strategy,
+                func.count(DocumentChunk.id).label("chunk_count"),
+            )
+            .filter(DocumentChunk.user_id == user_id)
+            .group_by(DocumentChunk.source_file, DocumentChunk.chunking_strategy)
+            .all()
+        )
+    return {
+        (row.source_file, row.chunking_strategy or "fixed"): row.chunk_count
+        for row in rows
+    }
+
+
+def is_ingestion_in_progress(user_id: str | None = None) -> bool:
+    """Return True if a background ingestion job is currently running.
+
+    Pass user_id to count only that account's job, so one user's upload never
+    blocks (or is visible to) another user's pages.
+    """
     status = mark_stale_if_needed()
+    if user_id is not None and status.get("user_id") != user_id:
+        return False
     return bool(status.get("in_progress"))

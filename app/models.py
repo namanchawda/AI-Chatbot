@@ -14,6 +14,13 @@ class QueryRequest(BaseModel):
     """Schema for a retrieval and generation question request."""
 
     question: str = Field(..., min_length=1, description="User question to answer using the indexed documents.")
+    user_id: str = Field(
+        ...,
+        description=(
+            "Id of the account whose documents are searched. Required because "
+            "the API has no login session to infer it from."
+        ),
+    )
     session_id: str | None = Field(
         default=None,
         description="Chat session ID. Omit to create a new session automatically.",
@@ -48,8 +55,12 @@ class QueryResponse(BaseModel):
 
 
 class CreateSessionRequest(BaseModel):
-    """Optional request body for creating a session with an initial title."""
+    """Request body for creating a session with an optional initial title."""
 
+    user_id: str = Field(
+        ...,
+        description="Id of the account that will own the session (required — the API has no login session).",
+    )
     title: str | None = None
 
 

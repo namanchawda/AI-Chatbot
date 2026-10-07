@@ -30,6 +30,8 @@ def default_status() -> dict:
         "chunk_count": 0,
         "process_pid": None,
         "started_at": None,
+        # Account that started the job — lets the UI hide other users' progress.
+        "user_id": None,
         "error": None,
     }
 

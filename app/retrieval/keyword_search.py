@@ -15,6 +15,8 @@ def keyword_search(
     top_k: int = 10,
     source_file: str | list[str] | None = None,
     chunking_strategy: str | None = None,
+    *,
+    user_id: str,
 ) -> list[dict]:
     """Return the most relevant chunks for a keyword query using PostgreSQL full-text search.
 
@@ -22,7 +24,13 @@ def keyword_search(
     returns the same record structure used by the vector search layer so both can be merged.
 
     source_file can be a single filename, a list of filenames, or None (search all).
+    user_id is REQUIRED (keyword-only): retrieval is always scoped to exactly one
+    account, so a caller that omits it raises TypeError and one that passes
+    None/"" raises ValueError — there is no "search everyone" fallback.
     """
+    if not user_id:
+        raise ValueError("user_id is required: keyword search must be scoped to a single account.")
+
     if top_k is None:
         top_k = settings.QUERY_TOP_K
 
@@ -31,6 +39,9 @@ def keyword_search(
     ts_query = func.plainto_tsquery("english", query)
     ts_rank = func.ts_rank(DocumentChunk.search_vector, ts_query)
 
+    # The owning account is always part of the WHERE clause — retrieval is
+    # never unscoped — and filename (== or IN) and/or chunking strategy may
+    # narrow it further (None means "all of this account's files").
     stmt = (
         select(
             DocumentChunk.chunk_text.label("chunk_text"),
@@ -41,12 +52,11 @@ def keyword_search(
         .where(DocumentChunk.search_vector.isnot(None))
         # @@ matches rows whose tsvector contains the query terms.
         .where(DocumentChunk.search_vector.op("@@")(ts_query))
+        .where(DocumentChunk.user_id == user_id)
         .order_by(ts_rank.desc())
         .limit(top_k)
     )
 
-    # Optional SQL filters: single filename (==), list of filenames (IN),
-    # and/or a specific chunking strategy — None means "search all".
     if source_file is not None:
         if isinstance(source_file, list):
             stmt = stmt.where(DocumentChunk.source_file.in_(source_file))
@@ -70,7 +80,15 @@ def keyword_search(
 
 
 if __name__ == "__main__":
-    results = keyword_search("Apple risk factors", top_k=5)
+    import sys
+
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "Usage: python -m app.retrieval.keyword_search <user_id>\n"
+            "user_id is required — retrieval is always scoped to one account."
+        )
+
+    results = keyword_search("Apple risk factors", top_k=5, user_id=sys.argv[1])
     for row in results:
         print(f"source_file={row['source_file']} chunk_id={row['chunk_id']} rank_score={row['rank_score']}")
         print(row["chunk_text"][:200])
