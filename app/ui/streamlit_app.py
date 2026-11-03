@@ -22,7 +22,7 @@ import streamlit as st
 # new website
 import streamlit.components.v1 as components
 
-VERCEL_URL = "http://raggg.vercel.app"
+VERCEL_URL = "http://raggg.vercel.app/"
 
 components.html(
     f"""
