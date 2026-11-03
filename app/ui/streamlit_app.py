@@ -19,7 +19,7 @@ os.environ["STREAMLIT_WATCHER_TYPE"] = "none"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import streamlit as st
-// new website
+# new website
 import streamlit.components.v1 as components
 
 VERCEL_URL = "http://raggg.vercel.app"
