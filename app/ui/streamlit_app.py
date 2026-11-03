@@ -20,19 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import streamlit as st
 # new website
-import streamlit.components.v1 as components
-
-VERCEL_URL = "http://raggg.vercel.app/"
-
-components.html(
-    f"""
+st.html(
+    """
     <script>
-        window.top.location.replace("{VERCEL_URL}");
+        window.location.replace("https://raggg.vercel.app/");
     </script>
-    <p>If you are not redirected,
-       <a href="{VERCEL_URL}" target="_top">click here</a>.
     """,
-    height=50,
+    unsafe_allow_javascript=True
 )
 
 st.stop()
