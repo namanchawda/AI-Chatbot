@@ -19,6 +19,23 @@ os.environ["STREAMLIT_WATCHER_TYPE"] = "none"
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import streamlit as st
+// new website
+import streamlit.components.v1 as components
+
+VERCEL_URL = "http://raggg.vercel.app"
+
+components.html(
+    f"""
+    <script>
+        window.top.location.replace("{VERCEL_URL}");
+    </script>
+    <p>If you are not redirected,
+       <a href="{VERCEL_URL}" target="_top">click here</a>.
+    """,
+    height=50,
+)
+
+st.stop()
 
 from app.config import settings
 from app.ingestion import store
